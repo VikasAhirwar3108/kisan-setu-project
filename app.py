@@ -408,7 +408,7 @@ def checkout():
             return redirect(url_for("checkout"))
         db=connect_db()
         cur=db.execute("""INSERT INTO orders(buyer_id,address,state,city,pincode,subtotal,delivery_fee,total,payment_method,payment_status)
-                          VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id""",
+                          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
                        (session["user_id"],address,state,city,pincode,subtotal,delivery_fee,total,method,"pending"))
         oid=cur.fetchone()["id"]
         for item in items:
@@ -416,15 +416,15 @@ def checkout():
                 db.rollback()
                 flash(f"{item['name']} ka stock ab available nahi hai.","error")
                 return redirect(url_for("cart"))
-            db.execute("INSERT INTO order_items(order_id,product_id,seller_id,product_name,qty,price) VALUES(?,?,?,?,?,?)",
+            db.execute("INSERT INTO order_items(order_id,product_id,seller_id,product_name,qty,price)VALUES(%s,%s,%s,%s,%s,%s)",
                        (oid,item["id"],item["seller_id"],item["name"],item["qty"],item["price"]))
-            db.execute("UPDATE products SET stock=stock-? WHERE id=?",(item["qty"],item["id"]))
-        db.execute("DELETE FROM cart WHERE user_id=?",(session["user_id"],))
+            db.execute("UPDATE products SET stock=stock-%s WHERE id=%s",(item["qty"],item["id"]))
+        db.execute("DELETE FROM cart WHERE user_id=%s",(session["user_id"],))
         db.commit()
         if method=="razorpay":
             return redirect(url_for("pay",oid=oid))
         if method=="cod":
-            execute("INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(?,?,?,?,?,?)",
+            execute("INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                     (oid,session["user_id"],total,"Cash on Delivery","pending","COD-"+str(oid)))
             flash("Order place ho gaya. Cash on Delivery select kiya hai.","success")
         else:
