@@ -11,7 +11,7 @@ except ImportError:
     razorpay = None
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "change-this-before-deployment")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-this")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "greenbasket.db")
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
