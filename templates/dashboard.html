@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block title %}{{ role|title }} Dashboard · Kisan Setu{% endblock %}
+{% block content %}
+<div class="row"><div><span class="pill">{{ role|upper }} PORTAL</span><h1 style="margin-top:8px">Welcome, {{ session.get('name','User') }}</h1><p class="muted">Your account overview and role-specific tools.</p></div><a class="btn alt" href="{{ url_for('products') }}">Browse marketplace</a></div>
+
+{% if role == 'admin' %}
+<div class="grid" style="margin:22px 0">
+ <div class="card pad"><p class="muted">Total users</p><h1>{{ data.users_count }}</h1><a href="{{ url_for('admin') }}">Manage users →</a></div>
+ <div class="card pad"><p class="muted">Products</p><h1>{{ data.products_count }}</h1><a href="{{ url_for('products') }}">View listings →</a></div>
+ <div class="card pad"><p class="muted">Orders</p><h1>{{ data.orders_count }}</h1><a href="{{ url_for('admin') }}">Manage orders →</a></div>
+ <div class="card pad"><p class="muted">Verified payments</p><h1>₹{{ '%.2f'|format(data.paid_total) }}</h1><a href="{{ url_for('payments') }}">All payment records →</a></div>
+</div>
+<div class="row"><h2>Recent orders</h2><a href="{{ url_for('admin') }}">Open admin panel →</a></div>
+<div class="tablewrap"><table><tr><th>Order</th><th>Buyer</th><th>Total</th><th>Payment</th><th>Status</th><th>Track</th></tr>{% for o in data.recent_orders %}<tr><td>#{{ o.id }}</td><td>{{ o.buyer_name or o.buyer_id }}</td><td>₹{{ '%.2f'|format(o.total) }}</td><td>{{ o.payment_status }}</td><td>{{ o.status }}</td><td><a href="{{ url_for('track',oid=o.id) }}">Track</a></td></tr>{% else %}<tr><td colspan="6">No orders yet.</td></tr>{% endfor %}</table></div>
+
+{% elif role == 'farmer' %}
+<div class="grid" style="margin:22px 0">
+ <div class="card pad"><p class="muted">My listings</p><h1>{{ data.products_count }}</h1><a href="{{ url_for('manage_listings') }}">Manage products →</a></div>
+ <div class="card pad"><p class="muted">Available stock total</p><h1>{{ '%.1f'|format(data.stock_count) }}</h1></div>
+ <div class="card pad"><p class="muted">Orders containing my products</p><h1>{{ data.sales_count }}</h1></div>
+ <div class="card pad"><p class="muted">Gross product sales</p><h1>₹{{ '%.2f'|format(data.sales_total) }}</h1><a href="{{ url_for('payments') }}">Payment status →</a></div>
+</div>
+<div class="row"><h2>Farmer tools</h2><a class="btn" href="{{ url_for('sell') }}">＋ Add product</a></div>
+<div class="tablewrap"><table><tr><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th>Status</th></tr>{% for p in data.products %}<tr><td>{{ p.name }}</td><td>{{ p.category }}</td><td>₹{{ p.price }}</td><td>{{ p.stock }} {{ p.unit }}</td><td>{{ 'Active' if p.active else 'Hidden' }}</td></tr>{% else %}<tr><td colspan="5">You have not listed products yet.</td></tr>{% endfor %}</table></div>
+<h2 style="margin-top:25px">Recent sales</h2><div class="tablewrap"><table><tr><th>Order</th><th>Date</th><th>My product total</th><th>Payment</th><th>Order status</th></tr>{% for o in data.sales %}<tr><td>#{{ o.id }}</td><td>{{ o.created_at }}</td><td>₹{{ '%.2f'|format(o.seller_total) }}</td><td>{{ o.payment_status }}</td><td>{{ o.status }}</td></tr>{% else %}<tr><td colspan="5">No sales yet.</td></tr>{% endfor %}</table></div>
+
+{% elif role == 'buyer' %}
+<div class="grid" style="margin:22px 0">
+ <div class="card pad"><p class="muted">My orders</p><h1>{{ data.orders_count }}</h1><a href="{{ url_for('orders') }}">View orders →</a></div>
+ <div class="card pad"><p class="muted">Cart products</p><h1>{{ data.cart_count }}</h1><a href="{{ url_for('cart') }}">Open cart →</a></div>
+ <div class="card pad"><p class="muted">Verified payments</p><h1>₹{{ '%.2f'|format(data.paid_total) }}</h1><a href="{{ url_for('payments') }}">Payment history →</a></div>
+</div>
+<div class="row"><h2>My recent orders</h2><a class="btn" href="{{ url_for('products') }}">Shop now</a></div>
+<div class="tablewrap"><table><tr><th>Order</th><th>Date</th><th>Total</th><th>Payment</th><th>Status</th><th>Track</th></tr>{% for o in data.orders %}<tr><td>#{{ o.id }}</td><td>{{ o.created_at }}</td><td>₹{{ '%.2f'|format(o.total) }}</td><td>{{ o.payment_status }}</td><td>{{ o.status }}</td><td><a href="{{ url_for('track',oid=o.id) }}">Track</a></td></tr>{% else %}<tr><td colspan="6">No orders yet. Browse the marketplace to get started.</td></tr>{% endfor %}</table></div>
+<h2 style="margin-top:25px">Recent payments</h2><div class="tablewrap"><table><tr><th>Order</th><th>Amount</th><th>Method</th><th>Status</th><th>Reference</th></tr>{% for p in data.payments %}<tr><td>#{{ p.order_id }}</td><td>₹{{ '%.2f'|format(p.amount) }}</td><td>{{ p.method }}</td><td>{{ p.status }}</td><td>{{ p.reference }}</td></tr>{% else %}<tr><td colspan="5">No payment records yet.</td></tr>{% endfor %}</table></div>
+
+{% elif role == 'driver' %}
+<div class="grid" style="margin:22px 0">
+ <div class="card pad"><p class="muted">Assigned active deliveries</p><h1>{{ data.assigned_count }}</h1><a href="{{ url_for('driver_orders') }}">Driver desk →</a></div>
+ <div class="card pad"><p class="muted">Completed deliveries</p><h1>{{ data.completed_count }}</h1></div>
+</div>
+<h2>Available and assigned deliveries</h2><p class="muted">You can claim an unassigned delivery by saving its delivery update. Customer payment details are not shown to drivers.</p>
+<div class="tablewrap"><table><tr><th>Order</th><th>Delivery city</th><th>Order status</th><th>Assigned</th><th>Action</th></tr>{% for o in data.deliveries %}<tr><td>#{{ o.id }}</td><td>{{ o.city }}, {{ o.state }}</td><td>{{ o.status }}</td><td>{{ 'You' if o.driver_id==session.get('user_id') else 'Available' }}</td><td><a href="{{ url_for('driver_orders') }}">Open Driver Desk</a></td></tr>{% else %}<tr><td colspan="5">No deliveries available right now.</td></tr>{% endfor %}</table></div>
+{% endif %}
+{% endblock %}
