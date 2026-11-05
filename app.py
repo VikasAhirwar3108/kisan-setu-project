@@ -407,9 +407,18 @@ def checkout():
             flash("Delivery address, PIN code, location ya payment method check karein.","error")
             return redirect(url_for("checkout"))
         db=connect_db()
-        cur=db.execute("""INSERT INTO orders(buyer_id,address,state,city,pincode,subtotal,delivery_fee,total,payment_method,payment_status)
-                          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-                       (session["user_id"],address,state,city,pincode,subtotal,delivery_fee,total,method,"pending"))
+cur = db.execute(
+    """INSERT INTO orders(
+        buyer_id,address,state,city,pincode,subtotal,
+        delivery_fee,total,payment_method,payment_status
+    )
+    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    RETURNING id""",
+    (
+        session["user_id"], address, state, city, pincode,
+        subtotal, delivery_fee, total, method, "pending"
+    )
+)
         oid=cur.fetchone()["id"]
         for item in items:
             if item["stock"] < item["qty"]:
@@ -424,8 +433,10 @@ def checkout():
         if method=="razorpay":
             return redirect(url_for("pay",oid=oid))
         if method=="cod":
-            execute("INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (oid,session["user_id"],total,"Cash on Delivery","pending","COD-"+str(oid)))
+execute(
+    "INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(%s,%s,%s,%s,%s,%s)",
+    (oid, session["user_id"], total, "Cash on Delivery", "pending", "COD-" + str(oid))
+)
             flash("Order place ho gaya. Cash on Delivery select kiya hai.","success")
         else:
             # Demo placeholder for non-gateway methods: do not mark paid automatically.
