@@ -1,20 +1,25 @@
 # Kisan Setu
 
-## Run
-1. Open this folder in VS Code.
-2. In Terminal run:
-   ```powershell
-   python -m pip install -r requirements.txt
-   python app.py
-   ```
-3. Open http://127.0.0.1:5000
+Flask-based digital agriculture marketplace.
 
-## Demo logins (created only when the database has no users)
-- Admin: `admin` / `Admin@123`
-- Farmer: `farmer1` / `Farmer@123`
-- Buyer: `buyer1` / `Buyer@123`
-- Driver: `driver1` / `Driver@123`
+## Deployment (Vercel + Neon)
 
-Product images use distinct Unsplash image URLs and require internet access in the browser.
-Razorpay online payments require your own test credentials. Do not use live credentials in source code.
-Back up your existing database before replacing it.
+1. Create a Neon PostgreSQL project and copy its pooled connection string.
+2. In Vercel Project Settings, add `DATABASE_URL` with that connection string for Production and Preview.
+3. Add a strong random `SECRET_KEY` environment variable.
+4. Optional: add `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_NAME` to provision the first admin account. Use a unique password and keep it private.
+5. Add `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` only when Razorpay test/live account setup and webhook verification are ready.
+6. Redeploy after setting environment variables.
+
+The app creates its PostgreSQL tables automatically on first database request. It seeds public catalog products only; it does not create shared demo login credentials. Users can register through the app.
+
+## Local run
+
+Set `DATABASE_URL` to a Neon PostgreSQL connection string and `SECRET_KEY` in your shell, then run:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Do not commit `.env`, database passwords, Razorpay secrets, or production credentials.

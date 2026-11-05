@@ -1,5 +1,7 @@
 
-import os, sqlite3, json, hmac, hashlib
+import os, json, hmac, hashlib, threading
+import psycopg
+from psycopg.rows import dict_row
 from functools import wraps
 from datetime import datetime
 from flask import Flask, g, request, redirect, url_for, render_template, flash, session, abort, jsonify
@@ -12,7 +14,9 @@ except ImportError:
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-this")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "greenbasket.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+_schema_ready = False
+_schema_lock = threading.Lock()
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 
@@ -96,129 +100,116 @@ CROPS = [
     ("Almonds (250 g)","Nuts & Seeds",180,"Premium nuts")
 ]
 
+def _sql(sql):
+    """Convert the app's SQLite-style placeholders to psycopg placeholders."""
+    return sql.replace("?", "%s")
+
+
+def init_db():
+    """Create the PostgreSQL schema once per serverless worker."""
+    global _schema_ready
+    if _schema_ready:
+        return
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is missing. Add the Neon connection string in Vercel.")
+    with _schema_lock:
+        if _schema_ready:
+            return
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10) as db:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS users(
+              id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, username TEXT UNIQUE NOT NULL,
+              password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'buyer', phone TEXT DEFAULT '',
+              state TEXT DEFAULT '', city TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS products(
+              id BIGSERIAL PRIMARY KEY, seller_id BIGINT REFERENCES users(id), name TEXT NOT NULL,
+              category TEXT NOT NULL, description TEXT DEFAULT '', price DOUBLE PRECISION NOT NULL,
+              stock DOUBLE PRECISION NOT NULL DEFAULT 0, unit TEXT DEFAULT 'kg', state TEXT DEFAULT '',
+              city TEXT DEFAULT '', image TEXT DEFAULT '', active SMALLINT DEFAULT 1,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS orders(
+              id BIGSERIAL PRIMARY KEY, buyer_id BIGINT REFERENCES users(id), address TEXT NOT NULL,
+              state TEXT NOT NULL, city TEXT NOT NULL, pincode TEXT NOT NULL, subtotal DOUBLE PRECISION NOT NULL,
+              delivery_fee DOUBLE PRECISION NOT NULL DEFAULT 0, total DOUBLE PRECISION NOT NULL,
+              payment_method TEXT NOT NULL, payment_status TEXT NOT NULL DEFAULT 'pending',
+              payment_reference TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'Placed', driver_name TEXT DEFAULT '',
+              driver_phone TEXT DEFAULT '', vehicle_number TEXT DEFAULT '', driver_lat DOUBLE PRECISION,
+              driver_lon DOUBLE PRECISION, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS order_items(
+              id BIGSERIAL PRIMARY KEY, order_id BIGINT REFERENCES orders(id), product_id BIGINT,
+              seller_id BIGINT, product_name TEXT, qty DOUBLE PRECISION, price DOUBLE PRECISION
+            );
+            CREATE TABLE IF NOT EXISTS payment_history(
+              id BIGSERIAL PRIMARY KEY, order_id BIGINT, user_id BIGINT, amount DOUBLE PRECISION,
+              method TEXT, status TEXT, reference TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS cart(
+              id BIGSERIAL PRIMARY KEY, user_id BIGINT, product_id BIGINT, qty DOUBLE PRECISION DEFAULT 1,
+              UNIQUE(user_id, product_id)
+            );
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_id BIGINT;
+            ALTER TABLE products ADD COLUMN IF NOT EXISTS image TEXT DEFAULT '';
+            ALTER TABLE products ADD COLUMN IF NOT EXISTS active SMALLINT DEFAULT 1;
+            """)
+            # Seed public catalog items only. No public demo login/passwords are created.
+            product_count = db.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"]
+            if product_count == 0:
+                for name, category, price, desc in CROPS:
+                    db.execute(
+                        """INSERT INTO products
+                        (seller_id,name,category,description,price,stock,unit,state,city,image,active)
+                        VALUES (NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,1)""",
+                        (name, category, desc, price, random_stock(name),
+                         "kg" if "Eggs" not in name and "Milk" not in name else "pack",
+                         "Madhya Pradesh", "Bhopal", auto_image(name)),
+                    )
+            # Optional administrator account, provisioned only from private Vercel env vars.
+            admin_username = os.environ.get("ADMIN_USERNAME", "").strip().lower()
+            admin_password = os.environ.get("ADMIN_PASSWORD", "")
+            if admin_username and admin_password:
+                existing = db.execute("SELECT id FROM users WHERE username=%s", (admin_username,)).fetchone()
+                if not existing:
+                    db.execute(
+                        "INSERT INTO users(name,username,password_hash,role) VALUES(%s,%s,%s,'admin')",
+                        (os.environ.get("ADMIN_NAME", "Portal Admin"), admin_username,
+                         generate_password_hash(admin_password)),
+                    )
+        _schema_ready = True
+
+
 def connect_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys=ON")
+        init_db()
+        g.db = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
     return g.db
+
 
 @app.teardown_appcontext
 def close_db(exc):
     db = g.pop("db", None)
     if db is not None:
+        if exc is not None:
+            db.rollback()
         db.close()
 
+
 def query(sql, args=(), one=False):
-    cur = connect_db().execute(sql, args)
+    cur = connect_db().execute(_sql(sql), args)
     rows = cur.fetchall()
     cur.close()
     return (rows[0] if rows else None) if one else rows
 
+
 def execute(sql, args=()):
     db = connect_db()
-    cur = db.execute(sql, args)
+    cur = db.execute(_sql(sql), args)
     db.commit()
-    return cur.lastrowid
+    cur.close()
 
-def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.executescript("""
-    CREATE TABLE IF NOT EXISTS users(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'buyer', phone TEXT DEFAULT '',
-      state TEXT DEFAULT '', city TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS products(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, name TEXT NOT NULL, category TEXT NOT NULL,
-      description TEXT DEFAULT '', price REAL NOT NULL, stock REAL NOT NULL DEFAULT 0, unit TEXT DEFAULT 'kg',
-      state TEXT DEFAULT '', city TEXT DEFAULT '', image TEXT DEFAULT '', active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(seller_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS orders(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, buyer_id INTEGER, address TEXT NOT NULL, state TEXT NOT NULL,
-      city TEXT NOT NULL, pincode TEXT NOT NULL, subtotal REAL NOT NULL, delivery_fee REAL NOT NULL DEFAULT 0,
-      total REAL NOT NULL, payment_method TEXT NOT NULL, payment_status TEXT NOT NULL DEFAULT 'pending',
-      payment_reference TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'Placed', driver_name TEXT DEFAULT '',
-      driver_phone TEXT DEFAULT '', vehicle_number TEXT DEFAULT '', driver_lat REAL, driver_lon REAL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(buyer_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS order_items(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, product_id INTEGER, seller_id INTEGER,
-      product_name TEXT, qty REAL, price REAL, FOREIGN KEY(order_id) REFERENCES orders(id));
-    CREATE TABLE IF NOT EXISTS payment_history(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, user_id INTEGER, amount REAL,
-      method TEXT, status TEXT, reference TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS cart(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, product_id INTEGER, qty REAL DEFAULT 1,
-      UNIQUE(user_id, product_id));
-    """)
-    # Safe schema migration for databases created by earlier versions.
-    order_columns = {row[1] for row in db.execute("PRAGMA table_info(orders)").fetchall()}
-    if "driver_id" not in order_columns:
-        db.execute("ALTER TABLE orders ADD COLUMN driver_id INTEGER")
 
-    product_columns = {row[1] for row in db.execute("PRAGMA table_info(products)").fetchall()}
-    if "image" not in product_columns:
-        db.execute("ALTER TABLE products ADD COLUMN image TEXT DEFAULT ''")
-    if "active" not in product_columns:
-        db.execute("ALTER TABLE products ADD COLUMN active INTEGER DEFAULT 1")
-
-    count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if count == 0:
-        demo = [
-            ("Portal Admin","admin","Admin@123","admin","9999999999","Delhi","New Delhi"),
-            ("Green Farmer","farmer1","Farmer@123","farmer","9876543210","Madhya Pradesh","Bhopal"),
-            ("Fresh Mart Buyer","buyer1","Buyer@123","buyer","9123456780","Madhya Pradesh","Indore"),
-            ("Delivery Driver","driver1","Driver@123","driver","9000000001","Delhi","Delhi")
-        ]
-        for name, username, password, role, phone, state, city in demo:
-            db.execute("INSERT INTO users(name,username,password_hash,role,phone,state,city) VALUES(?,?,?,?,?,?,?)",
-                       (name, username, generate_password_hash(password), role, phone, state, city))
-        farmer_row = db.execute(
-            "SELECT id FROM users WHERE username = ?",
-            ("farmer1",)
-        ).fetchone()
-
-        if farmer_row:
-            farmer_id = farmer_row[0]
-
-            for name, category, price, desc in CROPS:
-                db.execute(
-                    """INSERT INTO products
-                    (seller_id, name, category, description, price, stock, unit, state, city)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        farmer_id,
-                        name,
-                        category,
-                        desc,
-                        price,
-                        random_stock(name),
-                        "kg" if "Eggs" not in name and "Milk" not in name else "pack",
-                        "Madhya Pradesh",
-                        "Bhopal",
-                    ),
-                )
-
-        db.commit()
-
-    # Keep the documented demo accounts available in this local prototype,
-    # even when the SQLite file already contains older user records.
-    demo_accounts = [
-        ("Portal Admin", "admin", "Admin@123", "admin", "9999999999", "Delhi", "New Delhi"),
-        ("Green Farmer", "farmer1", "Farmer@123", "farmer", "9876543210", "Madhya Pradesh", "Bhopal"),
-        ("Fresh Mart Buyer", "buyer1", "Buyer@123", "buyer", "9123456780", "Madhya Pradesh", "Indore"),
-        ("Delivery Driver", "driver1", "Driver@123", "driver", "9000000001", "Delhi", "Delhi"),
-    ]
-    for name, username, password, role, phone, state, city in demo_accounts:
-        existing = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-        if existing:
-            db.execute("UPDATE users SET password_hash=?, role=? WHERE username=?",
-                       (generate_password_hash(password), role, username))
-        else:
-            db.execute("""INSERT INTO users(name,username,password_hash,role,phone,state,city)
-                          VALUES(?,?,?,?,?,?,?)""",
-                       (name, username, generate_password_hash(password), role, phone, state, city))
-    db.commit()
-    db.close()
 def random_stock(name):
     return 80 if "Milk" not in name else 40
 
@@ -277,7 +268,7 @@ def register():
                         (name,username,generate_password_hash(password),role,phone,state,city))
                 flash("Registration successful. Ab login karein.","success")
                 return redirect(url_for("login"))
-            except sqlite3.IntegrityError:
+            except psycopg.errors.UniqueViolation:
                 flash("Ye username pehle se maujood hai.","error")
     return render_template("register.html")
 
@@ -417,9 +408,9 @@ def checkout():
             return redirect(url_for("checkout"))
         db=connect_db()
         cur=db.execute("""INSERT INTO orders(buyer_id,address,state,city,pincode,subtotal,delivery_fee,total,payment_method,payment_status)
-                          VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                       (session["user_id"],address,state,city,pincode,subtotal,delivery_fee,total,method,"pending" if method!="cod" else "pending"))
-        oid=cur.lastrowid
+                          VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id""",
+                       (session["user_id"],address,state,city,pincode,subtotal,delivery_fee,total,method,"pending"))
+        oid=cur.fetchone()["id"]
         for item in items:
             if item["stock"] < item["qty"]:
                 db.rollback()
@@ -611,5 +602,4 @@ def forbidden(e):
     return render_template("error.html",code=403,message="Aapko is page ki permission nahi hai."),403
 
 if __name__=="__main__":
-    init_db()
-    app.run(debug=True)
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
