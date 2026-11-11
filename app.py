@@ -1,11 +1,13 @@
 
-import os, json, hmac, hashlib, threading
+import os, json, hmac, hashlib, threading, re
 import psycopg
 from psycopg.rows import dict_row
 from functools import wraps
 from datetime import datetime
 from flask import Flask, g, request, redirect, url_for, render_template, flash, session, abort, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
+import firebase_admin
+from firebase_admin import credentials, auth as firebase_auth
 
 try:
     import razorpay
@@ -17,10 +19,65 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-this")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 _schema_ready = False
 _schema_lock = threading.Lock()
+_firebase_lock = threading.Lock()
+_firebase_app = None
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 
-import re
+FIREBASE_WEB_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY", ""),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", ""),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", ""),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", ""),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", ""),
+    "appId": os.environ.get("FIREBASE_APP_ID", ""),
+}
+
+def get_firebase_admin():
+    """Initialize Firebase Admin once per worker using a private Vercel env secret."""
+    global _firebase_app
+    if _firebase_app:
+        return _firebase_app
+    with _firebase_lock:
+        if _firebase_app:
+            return _firebase_app
+        raw_credentials = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+        if raw_credentials:
+            service_account = json.loads(raw_credentials)
+            cred = credentials.Certificate(service_account)
+            project_id = service_account.get("project_id") or os.environ.get("FIREBASE_PROJECT_ID")
+        else:
+            credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            if credentials_path:
+                cred = credentials.Certificate(credentials_path)
+            else:
+                raise RuntimeError("Firebase Admin credentials are not configured.")
+            project_id = os.environ.get("FIREBASE_PROJECT_ID")
+        options = {"projectId": project_id} if project_id else None
+        try:
+            _firebase_app = firebase_admin.get_app()
+        except ValueError:
+            _firebase_app = firebase_admin.initialize_app(cred, options=options)
+    return _firebase_app
+
+def normalize_indian_phone(value):
+    """Return an E.164 Indian mobile number or an empty string."""
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 10:
+        digits = "91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    return ""
+
+def valid_password(password):
+    return (
+        len(password) >= 8
+        and re.search(r"[A-Z]", password)
+        and re.search(r"[a-z]", password)
+        and re.search(r"\d", password)
+        and re.search(r"[^A-Za-z0-9]", password)
+    )
+
 
 IMG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "images", "products")
 
@@ -220,7 +277,7 @@ def login_required(*roles):
             if not session.get("user_id"):
                 return redirect(url_for("login", next=request.path))
             if roles and session.get("role") not in roles:
-                flash("Aapko is action ki permission nahi hai.", "error")
+                flash("You are not allowed to perform this action.", "error")
                 return redirect(url_for("home"))
             return fn(*args, **kwargs)
         return wrapped
@@ -228,7 +285,7 @@ def login_required(*roles):
 
 @app.context_processor
 def global_context():
-    return {"states": sorted(LOCATIONS.keys()), "locations": LOCATIONS, "categories": sorted(set(x[1] for x in CROPS))}
+    return {"states": sorted(LOCATIONS.keys()), "locations": LOCATIONS, "categories": sorted(set(x[1] for x in CROPS)), "firebase_config": FIREBASE_WEB_CONFIG}
 
 @app.route("/")
 def home():
@@ -248,43 +305,86 @@ def products():
     sql += " ORDER BY p.id DESC"
     return render_template("products.html", products=query(sql,args), selected=category, search=search)
 
-@app.route("/register", methods=["GET","POST"])
+@app.route("/register", methods=["GET", "POST"])
 def register():
-    if request.method=="POST":
-        name=request.form.get("name","").strip()
-        username=request.form.get("username","").strip().lower()
-        password=request.form.get("password","")
-        role=request.form.get("role","buyer")
-        phone=request.form.get("phone","").strip()
-        state=request.form.get("state","")
-        city=request.form.get("city","")
-        if not name or len(username)<4 or len(password)<6 or role not in ("buyer","farmer","driver"):
-            flash("Naam, username (4+), password (6+) aur valid role bharna zaroori hai.","error")
-        elif state not in LOCATIONS or city not in LOCATIONS.get(state,[]):
-            flash("Valid state aur city select karein.","error")
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "")
+        role = request.form.get("role", "buyer")
+        phone = normalize_indian_phone(request.form.get("phone", ""))
+        state = request.form.get("state", "")
+        city = request.form.get("city", "")
+
+        if not name or len(username) < 4 or not valid_password(password) or role not in ("buyer", "farmer", "driver"):
+            flash("Enter your name, a username with at least 4 characters, a strong password, and a valid account type.", "error")
+        elif not phone:
+            flash("Enter a valid Indian mobile number with 10 digits or +91 country code.", "error")
+        elif state not in LOCATIONS or city not in LOCATIONS.get(state, []):
+            flash("Please select a valid state and city.", "error")
         else:
             try:
-                execute("INSERT INTO users(name,username,password_hash,role,phone,state,city) VALUES(?,?,?,?,?,?,?)",
-                        (name,username,generate_password_hash(password),role,phone,state,city))
-                flash("Registration successful. Ab login karein.","success")
+                execute(
+                    "INSERT INTO users(name,username,password_hash,role,phone,state,city) VALUES(?,?,?,?,?,?,?)",
+                    (name, username, generate_password_hash(password), role, phone, state, city)
+                )
+                flash("Registration successful. You can now sign in using phone OTP.", "success")
                 return redirect(url_for("login"))
             except psycopg.errors.UniqueViolation:
-                flash("Ye username pehle se maujood hai.","error")
+                connect_db().rollback()
+                flash("That username is already registered. Please choose another username.", "error")
     return render_template("register.html")
 
-@app.route("/login", methods=["GET","POST"])
+
+@app.route("/login", methods=["GET"])
 def login():
-    if request.method=="POST":
-        username=request.form.get("username","").strip().lower()
-        password=request.form.get("password","")
-        user=query("SELECT * FROM users WHERE username=?",(username,),one=True)
-        if user and check_password_hash(user["password_hash"],password):
-            session.clear()
-            session.update(user_id=user["id"],name=user["name"],role=user["role"])
-            nxt=request.args.get("next","")
-            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("dashboard"))
-        flash("Username ya password galat hai.","error")
-    return render_template("login.html")
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("login.html", next_url=request.args.get("next", ""))
+
+
+@app.post("/auth/firebase")
+def firebase_phone_login():
+    """Verify Firebase's signed ID token, then create the existing PostgreSQL session."""
+    payload = request.get_json(silent=True) or {}
+    id_token = payload.get("idToken", "")
+    if not id_token:
+        return jsonify({"ok": False, "message": "Phone verification token is missing. Please verify your OTP again."}), 400
+
+    try:
+        get_firebase_admin()
+        decoded = firebase_auth.verify_id_token(id_token, check_revoked=True)
+        verified_phone = normalize_indian_phone(decoded.get("phone_number", ""))
+        if not verified_phone:
+            return jsonify({"ok": False, "message": "Firebase did not return a verified Indian phone number."}), 401
+    except Exception:
+        app.logger.exception("Firebase ID token verification failed")
+        return jsonify({"ok": False, "message": "Phone verification failed. Please request a new OTP and try again."}), 401
+
+    last_ten = verified_phone[-10:]
+    users = query(
+        "SELECT * FROM users WHERE right(regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g'), 10)=%s",
+        (last_ten,)
+    )
+    if not users:
+        return jsonify({
+            "ok": False,
+            "code": "account_not_found",
+            "message": "No Kisan Setu account is registered with this phone number. Please create an account first."
+        }), 404
+    if len(users) > 1:
+        return jsonify({
+            "ok": False,
+            "message": "More than one account uses this phone number. Please contact support to resolve the duplicate."
+        }), 409
+
+    user = users[0]
+    session.clear()
+    session.update(user_id=user["id"], name=user["name"], role=user["role"])
+    next_url = payload.get("next", "")
+    safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("dashboard")
+    return jsonify({"ok": True, "redirect": safe_next})
+
 
 @app.route("/dashboard")
 @login_required()
@@ -349,11 +449,11 @@ def sell():
             price=stock=0
         state=f.get("state",""); city=f.get("city","")
         if not name or category not in [c[1] for c in CROPS] or price<=0 or stock<=0 or state not in LOCATIONS or city not in LOCATIONS.get(state,[]):
-            flash("Product, category, price, stock aur valid location check karein.","error")
+            flash("Please check the product, category, price, stock, and location.","error")
         else:
             execute("INSERT INTO products(seller_id,name,category,description,price,stock,unit,state,city,image) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (session["user_id"],name,category,f.get("description","")[:400],price,stock,f.get("unit","kg"),state,city,auto_image(name)))
-            flash("Aapki listing publish ho gayi.","success")
+            flash("Your listing has been published.","success")
             return redirect(url_for("products"))
     return render_template("sell.html")
 @app.post("/cart/add/<int:pid>")
@@ -361,10 +461,10 @@ def sell():
 def cart_add(pid):
     product = query("SELECT id, stock, active FROM products WHERE id=?", (pid,), one=True)
     if not product or not product["active"]:
-        flash("Yeh product ab available nahi hai.", "error")
+        flash("This product is no longer available.", "error")
         return redirect(request.referrer or url_for("products"))
     if product["stock"] <= 0:
-        flash("Is product ka stock khatam hai.", "error")
+        flash("This product is out of stock.", "error")
         return redirect(request.referrer or url_for("products"))
     try:
         qty = max(1.0, float(request.form.get("qty", "1")))
@@ -378,7 +478,7 @@ def cart_add(pid):
     else:
         execute("INSERT INTO cart(user_id, product_id, qty) VALUES(?,?,?)",
                 (session["user_id"], pid, min(qty, float(product["stock"]))))
-    flash("Product cart mein add ho gaya.", "success")
+    flash("Product added to your cart.", "success")
     return redirect(url_for("cart"))
 
 @app.route("/cart")
@@ -394,7 +494,7 @@ def checkout():
     items=query("""SELECT c.qty,p.* FROM cart c JOIN products p ON p.id=c.product_id
                    WHERE c.user_id=? AND p.active=1""",(session["user_id"],))
     if not items:
-        flash("Cart khaali hai.","error")
+        flash("Your cart is empty.","error")
         return redirect(url_for("products"))
     subtotal=round(sum(i["qty"]*i["price"] for i in items),2)
     delivery_fee=0 if subtotal>=999 else 49
@@ -404,26 +504,26 @@ def checkout():
         address=f.get("address","").strip(); state=f.get("state",""); city=f.get("city","")
         pincode=f.get("pincode","").strip(); method=f.get("payment_method","")
         if not address or len(pincode)!=6 or not pincode.isdigit() or state not in LOCATIONS or city not in LOCATIONS.get(state,[]) or method not in ("cod","upi","card","netbanking","razorpay"):
-            flash("Delivery address, PIN code, location ya payment method check karein.","error")
+            flash("Please check your delivery address, PIN code, location, and payment method.","error")
             return redirect(url_for("checkout"))
         db=connect_db()
-cur = db.execute(
-    """INSERT INTO orders(
-        buyer_id,address,state,city,pincode,subtotal,
-        delivery_fee,total,payment_method,payment_status
-    )
-    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    RETURNING id""",
-    (
-        session["user_id"], address, state, city, pincode,
-        subtotal, delivery_fee, total, method, "pending"
-    )
-)
+        cur = db.execute(
+            """INSERT INTO orders(
+                buyer_id,address,state,city,pincode,subtotal,
+                delivery_fee,total,payment_method,payment_status
+            )
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id""",
+            (
+                session["user_id"], address, state, city, pincode,
+                subtotal, delivery_fee, total, method, "pending"
+            )
+        )
         oid=cur.fetchone()["id"]
         for item in items:
             if item["stock"] < item["qty"]:
                 db.rollback()
-                flash(f"{item['name']} ka stock ab available nahi hai.","error")
+                flash(f"{item['name']} is no longer available in the requested quantity.","error")
                 return redirect(url_for("cart"))
             db.execute("INSERT INTO order_items(order_id,product_id,seller_id,product_name,qty,price)VALUES(%s,%s,%s,%s,%s,%s)",
                        (oid,item["id"],item["seller_id"],item["name"],item["qty"],item["price"]))
@@ -433,16 +533,16 @@ cur = db.execute(
         if method=="razorpay":
             return redirect(url_for("pay",oid=oid))
         if method=="cod":
-execute(
-    "INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(%s,%s,%s,%s,%s,%s)",
-    (oid, session["user_id"], total, "Cash on Delivery", "pending", "COD-" + str(oid))
-)
-            flash("Order place ho gaya. Cash on Delivery select kiya hai.","success")
+            execute(
+                "INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(%s,%s,%s,%s,%s,%s)",
+                (oid, session["user_id"], total, "Cash on Delivery", "pending", "COD-" + str(oid))
+            )
+            flash("Your order has been placed. Cash on Delivery is selected.","success")
         else:
             # Demo placeholder for non-gateway methods: do not mark paid automatically.
             execute("INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(?,?,?,?,?,?)",
                     (oid,session["user_id"],total,method.upper(),"pending","Awaiting payment gateway"))
-            flash("Order place ho gaya. Payment abhi pending hai. Secure payment gateway configure karein.","success")
+            flash("Your order has been placed. Payment is pending until a secure payment gateway is configured.","success")
         return redirect(url_for("orders"))
     return render_template("checkout.html",items=items,subtotal=subtotal,delivery_fee=delivery_fee,total=total)
 
@@ -462,14 +562,14 @@ def pay(oid):
     client=rp_client()
     if request.method=="POST":
         if not client:
-            flash("Razorpay keys configure nahi hain. Test keys set karke restart karein.","error")
+            flash("Razorpay is not configured. Please add your payment gateway credentials.","error")
             return redirect(url_for("pay",oid=oid))
         try:
             rp_order=client.order.create({"amount":int(round(order["total"]*100)),"currency":"INR","receipt":f"greenbasket_{oid}"})
             execute("UPDATE orders SET payment_reference=? WHERE id=?",(rp_order["id"],oid))
             return render_template("pay.html",order=order,key_id=RAZORPAY_KEY_ID,rp_order=rp_order)
         except Exception:
-            flash("Payment order create nahi hua. Razorpay keys check karein.","error")
+            flash("Unable to create the payment order. Please check your Razorpay configuration.","error")
     return render_template("pay.html",order=order,key_id=RAZORPAY_KEY_ID,rp_order=None)
 
 @app.post("/payment/verify")
@@ -483,7 +583,7 @@ def payment_verify():
     payment_id=f.get("razorpay_payment_id",""); rp_order_id=f.get("razorpay_order_id",""); signature=f.get("razorpay_signature","")
     expected=hmac.new(RAZORPAY_KEY_SECRET.encode(),(rp_order_id+"|"+payment_id).encode(),hashlib.sha256).hexdigest()
     if not RAZORPAY_KEY_SECRET or not all([payment_id,rp_order_id,signature]) or not hmac.compare_digest(expected,signature) or order["payment_reference"]!=rp_order_id:
-        flash("Payment verify nahi hua. Order unpaid hi rahega.","error")
+        flash("Payment could not be verified. The order will remain unpaid.","error")
         return redirect(url_for("orders"))
     execute("UPDATE orders SET payment_status='paid',payment_reference=? WHERE id=?",(payment_id,oid))
     execute("INSERT INTO payment_history(order_id,user_id,amount,method,status,reference) VALUES(?,?,?,?,?,?)",
@@ -516,7 +616,7 @@ def payments():
                         WHERE oi.seller_id=? GROUP BY o.id ORDER BY o.id DESC""", (uid,))
         title = "Sales Payment Status"
     else:
-        flash("Driver account ko payment history dekhne ki permission nahi hai.", "error")
+        flash("Driver accounts are not allowed to view payment history.", "error")
         return redirect(url_for("dashboard"))
     return render_template("payments.html", payments=rows, title=title, role=role)
 
@@ -579,7 +679,7 @@ def driver_update(oid):
     execute("""UPDATE orders SET status=?,driver_name=?,driver_phone=?,vehicle_number=?,driver_lat=?,driver_lon=?,driver_id=? WHERE id=?""",
             (status,f.get("driver_name","")[:80],f.get("driver_phone","")[:20],f.get("vehicle_number","")[:30],
              float(f["lat"]) if f.get("lat") else None,float(f["lon"]) if f.get("lon") else None,assigned_driver,oid))
-    flash("Delivery update save ho gaya.","success")
+    flash("Delivery update saved.","success")
     return redirect(url_for("driver_orders"))
 
 @app.route("/sell/manage")
@@ -606,11 +706,11 @@ def api_cities(state):
 
 @app.errorhandler(404)
 def not_found(e):
-    return render_template("error.html",code=404,message="Page nahi mila."),404
+    return render_template("error.html",code=404,message="Page not found."),404
 
 @app.errorhandler(403)
 def forbidden(e):
-    return render_template("error.html",code=403,message="Aapko is page ki permission nahi hai."),403
+    return render_template("error.html",code=403,message="You do not have permission to access this page."),403
 
 if __name__=="__main__":
     app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
