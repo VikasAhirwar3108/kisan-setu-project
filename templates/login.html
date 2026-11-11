@@ -1,17 +1,8 @@
-{% extends 'base.html' %}
-{% block content %}
+{% extends 'base.html' %}{% block content %}
 <form class="form" method="post">
-    <h1>Welcome back</h1>
-    <p class="muted">Login to your Kisan Setu account.</p>
-
-    <label>Username</label>
-    <input name="username" required autocomplete="username">
-
-    <label>Password</label>
-    <input type="password" name="password" required autocomplete="current-password">
-
-    <button style="width:100%;margin-top:18px">Login</button>
-
-    <p>New here? <a href="{{ url_for('register') }}">Create an account</a></p>
-</form>
-{% endblock %}
+<h1>Sign in with OTP</h1><p class="muted">Enter your username and registered phone number. We will send a one-time password by SMS.</p>
+<label>Username</label><input name="username" required autocomplete="username">
+<label>Registered phone number</label><input name="phone" type="tel" placeholder="e.g. +91 9876543210" required autocomplete="tel">
+<button style="width:100%;margin-top:18px">Send OTP</button>
+<p>New to Kisan Setu? <a href="{{ url_for('register') }}">Create an account</a></p>
+</form>{% endblock %}
