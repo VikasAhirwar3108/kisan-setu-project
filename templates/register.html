@@ -1,12 +1,75 @@
-{% extends 'base.html' %}{% block content %}
-<form class="form" method="post"><h1>Create your account</h1>
-<label>Full name</label><input name="name" required autocomplete="name">
-<label>Username (minimum 4 characters)</label><input name="username" required minlength="4" autocomplete="username">
-<label>Create password</label><input type="password" name="password" required minlength="8" autocomplete="new-password">
-<p class="muted">Use at least 8 characters, including one uppercase letter, one lowercase letter, one number, and one special character (for example: GreenFarm@2026).</p>
-<label>Account type</label><select name="role"><option value="buyer">Buyer</option><option value="farmer">Farmer</option><option value="driver">Delivery Driver</option></select>
-<label>Phone number (required for OTP sign-in)</label><input name="phone" type="tel" required placeholder="+91 9876543210" autocomplete="tel">
-<label>State</label><select name="state" id="state" required>{% for s in states %}<option>{{ s }}</option>{% endfor %}</select>
-<label>City</label><select name="city" id="city" required>{% for c in locations[states[0]] %}<option>{{ c }}</option>{% endfor %}</select>
-<button style="width:100%;margin-top:18px">Create account</button></form>
-<script>const locations={{ locations|tojson }};const s=document.getElementById('state'),c=document.getElementById('city');function fill(){c.innerHTML='';(locations[s.value]||[]).forEach(x=>{let o=document.createElement('option');o.textContent=x;o.value=x;c.appendChild(o)})}s.addEventListener('change',fill);</script>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Create Account | Kisan Setu{% endblock %}
+{% block content %}
+<form class="form" method="post" style="margin:30px auto">
+  <h1>Create your Kisan Setu account</h1>
+  <p class="muted">Create an account once, then sign in securely using phone OTP.</p>
+
+  <label for="name">Full name</label>
+  <input id="name" name="name" required autocomplete="name" maxlength="100">
+
+  <label for="username">Username</label>
+  <input id="username" name="username" required minlength="4" maxlength="40" autocomplete="username">
+  <p class="muted" style="font-size:12px">At least 4 characters. Usernames are used to identify your account.</p>
+
+  <label for="password">Create password</label>
+  <input id="password" type="password" name="password" required minlength="8" autocomplete="new-password">
+  <p class="muted" style="font-size:13px">Password requirements:</p>
+  <ul class="muted" style="font-size:13px;padding-left:20px">
+    <li>At least 8 characters</li>
+    <li>At least one uppercase letter (A-Z)</li>
+    <li>At least one lowercase letter (a-z)</li>
+    <li>At least one number (0-9)</li>
+    <li>At least one special character (such as @, #, ! or $)</li>
+  </ul>
+  <p class="muted" style="font-size:12px">Example format: GreenFarm@2026. Do not use this example as your actual password.</p>
+
+  <label for="role">Account type</label>
+  <select id="role" name="role" required>
+    <option value="buyer">Buyer</option>
+    <option value="farmer">Farmer</option>
+    <option value="driver">Delivery Driver</option>
+  </select>
+
+  <label for="phone">Mobile number</label>
+  <input id="phone" name="phone" type="tel" inputmode="tel" required
+         placeholder="+91 9876543210" autocomplete="tel">
+  <p class="muted" style="font-size:12px">Use a mobile number you can access. This number will be used for OTP sign-in.</p>
+
+  <label for="state">State</label>
+  <select name="state" id="state" required>
+    {% for s in states %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+  </select>
+
+  <label for="city">City</label>
+  <select name="city" id="city" required>
+    {% for c in locations[states[0]] %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+  </select>
+
+  <button type="submit" style="width:100%;margin-top:18px">Create account</button>
+  <p style="margin-top:18px">Already registered? <a href="{{ url_for('login') }}">Sign in with OTP</a></p>
+</form>
+<script>
+const locations = {{ locations|tojson }};
+const stateSelect = document.getElementById("state");
+const citySelect = document.getElementById("city");
+function updateCities() {
+  citySelect.innerHTML = "";
+  (locations[stateSelect.value] || []).forEach(city => {
+    const option = document.createElement("option");
+    option.value = city;
+    option.textContent = city;
+    citySelect.appendChild(option);
+  });
+}
+stateSelect.addEventListener("change", updateCities);
+document.getElementById("password").addEventListener("input", function () {
+  const value = this.value;
+  this.setCustomValidity(
+    value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) &&
+    /\d/.test(value) && /[^A-Za-z0-9]/.test(value)
+      ? "" : "Use at least 8 characters with uppercase, lowercase, a number, and a special character."
+  );
+});
+</script>
+{% endblock %}

@@ -1,5 +1,9 @@
-{% extends 'base.html' %}{% block content %}
-<form class="form" method="post"><h1>Verify your phone</h1><p class="muted">Enter the 6-digit OTP sent to your registered phone number.</p>
-<label>One-time password</label><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
-<button style="width:100%;margin-top:18px">Verify and sign in</button>
-<p><a href="{{ url_for('login') }}">Back to sign in</a></p></form>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}OTP Verification | Kisan Setu{% endblock %}
+{% block content %}
+<section class="form" style="margin:30px auto">
+  <h1>Phone verification</h1>
+  <p class="muted">OTP verification is completed securely on the sign-in page using Firebase Phone Authentication.</p>
+  <a class="btn" href="{{ url_for('login') }}">Return to phone sign-in</a>
+</section>
+{% endblock %}

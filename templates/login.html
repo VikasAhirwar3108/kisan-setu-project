@@ -1,8 +1,179 @@
-{% extends 'base.html' %}{% block content %}
-<form class="form" method="post">
-<h1>Sign in with OTP</h1><p class="muted">Enter your username and registered phone number. We will send a one-time password by SMS.</p>
-<label>Username</label><input name="username" required autocomplete="username">
-<label>Registered phone number</label><input name="phone" type="tel" placeholder="e.g. +91 9876543210" required autocomplete="tel">
-<button style="width:100%;margin-top:18px">Send OTP</button>
-<p>New to Kisan Setu? <a href="{{ url_for('register') }}">Create an account</a></p>
-</form>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Phone OTP Login | Kisan Setu{% endblock %}
+{% block content %}
+<section class="form" style="margin:30px auto">
+  <h1>Sign in to Kisan Setu</h1>
+  <p class="muted">Enter your registered mobile number. We will send a secure verification code.</p>
+
+  <div id="phone-step">
+    <label for="phone">Mobile number</label>
+    <input id="phone" type="tel" inputmode="tel" autocomplete="tel"
+           placeholder="+91 9876543210" maxlength="16" required>
+    <p class="muted" style="font-size:13px">Use your registered Indian mobile number. You can enter 10 digits or include +91.</p>
+    <div id="recaptcha-container" style="margin:14px 0"></div>
+    <button id="send-otp" type="button" style="width:100%">Send OTP</button>
+  </div>
+
+  <div id="code-step" hidden>
+    <p class="muted" id="sent-message">A verification code has been sent to your phone.</p>
+    <label for="otp-code">6-digit verification code</label>
+    <input id="otp-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9]{6}" maxlength="6" placeholder="Enter OTP" required>
+    <button id="verify-otp" type="button" style="width:100%;margin-top:16px">Verify and sign in</button>
+    <button id="change-number" type="button" class="btn alt" style="width:100%;margin-top:10px">Use a different number</button>
+  </div>
+
+  <p id="auth-message" class="notice" role="status" aria-live="polite" hidden></p>
+  <p style="margin-top:18px">New to Kisan Setu? <a href="{{ url_for('register') }}">Create an account</a></p>
+  <p class="muted" style="font-size:12px">Your phone number must already be registered with your Kisan Setu account.</p>
+</section>
+
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script>
+(() => {
+  const config = {{ firebase_config|tojson }};
+  const nextUrl = {{ next_url|tojson }};
+  const messageBox = document.getElementById("auth-message");
+  const phoneStep = document.getElementById("phone-step");
+  const codeStep = document.getElementById("code-step");
+  const phoneInput = document.getElementById("phone");
+  const codeInput = document.getElementById("otp-code");
+  const sendButton = document.getElementById("send-otp");
+  const verifyButton = document.getElementById("verify-otp");
+  const changeButton = document.getElementById("change-number");
+  let confirmationResult = null;
+  let recaptchaVerifier = null;
+
+  function showMessage(message, isError = true) {
+    messageBox.hidden = false;
+    messageBox.textContent = message;
+    messageBox.className = "notice" + (isError ? " error" : "");
+  }
+  function clearMessage() {
+    messageBox.hidden = true;
+    messageBox.textContent = "";
+  }
+  function normalizePhone(value) {
+    let digits = value.replace(/\D/g, "");
+    if (digits.length === 10) digits = "91" + digits;
+    if (digits.length === 12 && digits.startsWith("91")) return "+" + digits;
+    return "";
+  }
+  function setBusy(button, busy, label) {
+    button.disabled = busy;
+    if (busy) {
+      button.dataset.originalText = button.textContent;
+      button.textContent = label;
+    } else {
+      button.textContent = button.dataset.originalText || label;
+    }
+  }
+
+  const requiredConfig = ["apiKey", "authDomain", "projectId", "appId"];
+  if (!window.firebase || requiredConfig.some(key => !config[key])) {
+    showMessage("Phone sign-in is not configured yet. Please contact the website administrator.");
+    sendButton.disabled = true;
+    return;
+  }
+
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(config);
+    const auth = firebase.auth();
+    recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptcha-container", {
+      size: "normal",
+      callback: () => clearMessage(),
+      "expired-callback": () => showMessage("reCAPTCHA expired. Please complete it again.")
+    });
+    recaptchaVerifier.render();
+
+    sendButton.addEventListener("click", async () => {
+      clearMessage();
+      const phone = normalizePhone(phoneInput.value.trim());
+      if (!phone) {
+        showMessage("Enter a valid 10-digit Indian mobile number, optionally starting with +91.");
+        phoneInput.focus();
+        return;
+      }
+      setBusy(sendButton, true, "Sending OTP...");
+      try {
+        confirmationResult = await auth.signInWithPhoneNumber(phone, recaptchaVerifier);
+        document.getElementById("sent-message").textContent = "A verification code has been sent to " + phone + ".";
+        phoneStep.hidden = true;
+        codeStep.hidden = false;
+        codeInput.focus();
+        showMessage("OTP sent successfully. Check your SMS messages.", false);
+      } catch (error) {
+        const messages = {
+          "auth/invalid-phone-number": "The mobile number is invalid. Please check it and try again.",
+          "auth/too-many-requests": "Too many attempts. Please wait before requesting another OTP.",
+          "auth/quota-exceeded": "SMS quota exceeded for this Firebase project. Please try again later.",
+          "auth/captcha-check-failed": "reCAPTCHA verification failed. Please try again.",
+          "auth/operation-not-allowed": "Phone sign-in is not enabled in Firebase Authentication."
+        };
+        showMessage(messages[error.code] || "Unable to send OTP. Please check your number and try again.");
+        if (recaptchaVerifier) {
+          try { await recaptchaVerifier.render(); } catch (_) {}
+        }
+      } finally {
+        setBusy(sendButton, false, "Send OTP");
+      }
+    });
+
+    verifyButton.addEventListener("click", async () => {
+      clearMessage();
+      const code = codeInput.value.trim();
+      if (!/^\d{6}$/.test(code)) {
+        showMessage("Enter the 6-digit OTP sent to your mobile number.");
+        codeInput.focus();
+        return;
+      }
+      if (!confirmationResult) {
+        showMessage("Please request a new OTP first.");
+        return;
+      }
+      setBusy(verifyButton, true, "Verifying...");
+      try {
+        const credential = await confirmationResult.confirm(code);
+        const idToken = await credential.user.getIdToken(true);
+        const response = await fetch("{{ url_for('firebase_phone_login') }}", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          credentials: "same-origin",
+          body: JSON.stringify({idToken, next: nextUrl})
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          await auth.signOut();
+          showMessage(result.message || "Unable to sign in. Please try again.");
+          return;
+        }
+        window.location.assign(result.redirect || "{{ url_for('dashboard') }}");
+      } catch (error) {
+        const messages = {
+          "auth/invalid-verification-code": "The OTP is incorrect. Please check the code and try again.",
+          "auth/code-expired": "This OTP has expired. Please request a new one.",
+          "auth/session-expired": "Your verification session expired. Please request a new OTP."
+        };
+        showMessage(messages[error.code] || "OTP verification failed. Please request a new code and try again.");
+      } finally {
+        setBusy(verifyButton, false, "Verify and sign in");
+      }
+    });
+
+    changeButton.addEventListener("click", async () => {
+      confirmationResult = null;
+      codeInput.value = "";
+      codeStep.hidden = true;
+      phoneStep.hidden = false;
+      clearMessage();
+      await auth.signOut();
+      phoneInput.focus();
+    });
+  } catch (error) {
+    showMessage("Unable to initialize phone verification. Please refresh the page or contact the administrator.");
+    sendButton.disabled = true;
+  }
+})();
+</script>
+{% endblock %}
